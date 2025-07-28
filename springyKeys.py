@@ -152,7 +152,7 @@ def get_selected_keyframe_data():
     return None
 
 
-def apply_values(curve: str, times: list[float], values: list[float]):
+def apply_values(curve: str, times: list, values: list):
     """Apply new values to keyframes on an animation curve.
 
     :param str curve: Name of the Maya animation curve
@@ -345,7 +345,7 @@ def spring_damper_exact_ratio(
         Implements exact analytical solution for spring-damper system.
         Handles three cases:
 
-        - Critical damping (ratio ≈ 1.0): Fastest approach without overshoot
+        - Critical damping (ratio â‰ˆ 1.0): Fastest approach without overshoot
         - Under damping (ratio < 1.0): Oscillatory with decay
         - Over damping (ratio > 1.0): Slow approach without overshoot
     """
@@ -515,7 +515,7 @@ def ui():
         cmds.deleteUI("springOverlapWin")
 
     window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(600, 106))  # pylint: disable=E1111
-    cmds.columnLayout( adjustableColumn=True, margins=6 )
+    cmds.columnLayout( adjustableColumn=True)
     SLIDER_FACTOR = cmds.floatSliderGrp( label='Critical Damping Ratio' , field=True, min=0.0, max=1.0, value=DAMPING_FACTOR, step=0.001, dragCommand=update_factor,  changeCommand=complete, adjustableColumn=0  )  # pylint: disable=E1111
     cmds.separator()
     SLIDER_DAMPING  = cmds.floatSliderGrp( label='Damping Ratio ', field=True, min=0.001, max=1.0, value=DAMPING_RATIO, step=0.001, dragCommand=update_spring_keys, changeCommand=complete, adjustableColumn=0 )  # pylint: disable=E1111
