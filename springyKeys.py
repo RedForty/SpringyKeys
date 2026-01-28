@@ -142,8 +142,15 @@ def get_selected_keyframe_data():
         if is_equal(value_range):
             continue # Ignore flat curves
 
+        # Get the value at the frame before the first selected key
+        # so we can compute the incoming velocity at the start
+        pre_time = time_range[0] - 1
+        pre_value = cmds.keyframe(curve, q=True, time=(pre_time,), eval=True, valueChange=True)
+        pre_value = pre_value[0] if pre_value else value_range[0]
+
         key_data[curve] = { "times" : time_range
                           , "values" : value_range
+                          , "pre_value" : pre_value
                           }
 
     if key_data:
@@ -417,7 +424,7 @@ def update_spring_keys(*args):
     for curve in curves:
         new_values = []
         current_x = KEY_DATA[curve]["values"][0]
-        current_v = 0.0
+        current_v = (current_x - KEY_DATA[curve]["pre_value"]) / DELTA_TIME
         for value in KEY_DATA[curve]["values"]:
             current_x, current_v = spring_damper_exact_ratio(   current_x,
                                                                 current_v,
