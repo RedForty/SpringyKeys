@@ -128,7 +128,7 @@ def get_selected_keyframe_data():
 
         time_range = []
         time_range.extend( [float(x) for x in range(int(selected_times[0])
-                         , int(selected_times[-1]))])
+                         , int(selected_times[-1]) + 1)])
 
         # Extend 1 frame in either direction to act as pivot?
         # time_range.insert(selected_times[0] - 1, 0)
@@ -457,7 +457,9 @@ def update_deltatime(*args):
     """
     begin()
     global DELTA_TIME
-    DELTA_TIME = args[0]
+    # Clamp away from zero so the velocity calc and framerate label below
+    # never divide by zero when the slider is dragged fully left.
+    DELTA_TIME = max(args[0], 1e-3)
     update_spring_keys()
     framerate = round(1/DELTA_TIME, 2)
     cmds.floatSliderGrp(SLIDER_DT, e=True, label=f'Delta time ({framerate}fps) ')
@@ -532,7 +534,7 @@ def ui():
     cmds.separator()
     SLIDER_DAMPING  = cmds.floatSliderGrp( label='Damping Ratio ', field=True, min=0.001, max=1.0, value=DAMPING_RATIO, step=0.001, dragCommand=update_spring_keys, changeCommand=complete, adjustableColumn=0 )  # pylint: disable=E1111
     SLIDER_HALFLIFE = cmds.floatSliderGrp( label='Halflife' , field=True, min=0.0, max=1.0, value=HALFLIFE, step=0.001, dragCommand=update_spring_keys,  changeCommand=complete, adjustableColumn=0  )  # pylint: disable=E1111
-    SLIDER_DT = cmds.floatSliderGrp( label='Delta time (30fps) ' , field=True, min=0.0, max=1.0, value=DELTA_TIME, step=0.001, dragCommand=update_deltatime,  changeCommand=complete, adjustableColumn=0  )  # pylint: disable=E1111
+    SLIDER_DT = cmds.floatSliderGrp( label='Delta time (30fps) ' , field=True, min=0.001, max=1.0, value=DELTA_TIME, step=0.001, dragCommand=update_deltatime,  changeCommand=complete, adjustableColumn=0  )  # pylint: disable=E1111
     cmds.showWindow(window)
 
 
