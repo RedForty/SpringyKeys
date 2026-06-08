@@ -422,10 +422,15 @@ def update_spring_keys(*args):
     curves = KEY_DATA.keys()
 
     for curve in curves:
-        new_values = []
-        current_x = KEY_DATA[curve]["values"][0]
+        values = KEY_DATA[curve]["values"]
+        current_x = values[0]
         current_v = (current_x - KEY_DATA[curve]["pre_value"]) / DELTA_TIME
-        for value in KEY_DATA[curve]["values"]:
+
+        # The first selected key keeps its original value. Its incoming
+        # velocity is carried into the spring so the next steps continue
+        # the existing momentum instead of snapping forward an extra step.
+        new_values = [current_x]
+        for value in values[1:]:
             current_x, current_v = spring_damper_exact_ratio(   current_x,
                                                                 current_v,
                                                                 value,
