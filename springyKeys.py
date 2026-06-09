@@ -22,6 +22,14 @@ DAMPING_FACTOR = 0.1
 TIMELINE = mel.eval('string $tmpString=$gPlayBackSlider') # pylint: disable=E1111
 GRAPH_EDITOR = 'graphEditor1GraphEd'
 
+# Undo/redo slider sync. Slider values are pure UI state and are not part of
+# Maya's undo queue, so we track them ourselves and mirror them when the user
+# undoes/redoes one of our operations (chunks tagged with CHUNK_NAME).
+CHUNK_NAME = 'SpringyKeys'
+RESTING_STATE = None       # slider values at rest (before the next operation)
+SLIDER_UNDO_STACK = []     # resting states, one per applied operation
+SLIDER_REDO_STACK = []
+
 PRESET_COUNT = 3
 
 # Each solver is its own preset "section": its presets store only that
@@ -485,6 +493,79 @@ def update_deltatime(*args):
     cmds.floatSliderGrp(SLIDER_DT, e=True, label=f'Delta time ({framerate}fps) ')
 
 
+def capture_slider_state():
+    """Snapshot the current values of all sliders.
+
+    :return: Slider values keyed by name (plus the DELTA_TIME global)
+    :rtype: dict
+    """
+    return {
+        'factor':   cmds.floatSliderGrp(SLIDER_FACTOR, q=True, value=True),
+        'damping':  cmds.floatSliderGrp(SLIDER_DAMPING, q=True, value=True),
+        'halflife': cmds.floatSliderGrp(SLIDER_HALFLIFE, q=True, value=True),
+        'dt':       cmds.floatSliderGrp(SLIDER_DT, q=True, value=True),
+    }
+
+
+def restore_slider_state(state: dict):
+    """Push a captured slider snapshot back onto the sliders.
+
+    :param dict state: Snapshot produced by :func:`capture_slider_state`
+
+    .. note::
+        Also restores the DELTA_TIME global and the Delta Time label so the
+        spring sim and framerate stay in sync with the sliders.
+    """
+    global DELTA_TIME
+    cmds.floatSliderGrp(SLIDER_FACTOR, e=True, value=state['factor'])
+    cmds.floatSliderGrp(SLIDER_DAMPING, e=True, value=state['damping'])
+    cmds.floatSliderGrp(SLIDER_HALFLIFE, e=True, value=state['halflife'])
+    cmds.floatSliderGrp(SLIDER_DT, e=True, value=state['dt'])
+
+    DELTA_TIME = max(state['dt'], 1e-3)
+    framerate = round(1.0 / DELTA_TIME, 2)
+    cmds.floatSliderGrp(SLIDER_DT, e=True, label=f'Delta time ({framerate}fps) ')
+
+
+def on_undo():
+    """Mirror an undo of one of our operations back onto the sliders.
+
+    .. note::
+        Triggered by the Undo scriptJob event. Guarded by CHUNK_NAME so it
+        only reacts when the operation just undone was a SpringyKeys apply,
+        leaving unrelated undos alone.
+    """
+    global RESTING_STATE
+    if not SLIDER_UNDO_STACK:
+        return
+    if cmds.undoInfo(q=True, redoName=True) != CHUNK_NAME:
+        return  # The thing just undone was not ours
+
+    state = SLIDER_UNDO_STACK.pop()
+    SLIDER_REDO_STACK.append(capture_slider_state())
+    restore_slider_state(state)
+    RESTING_STATE = state
+
+
+def on_redo():
+    """Mirror a redo of one of our operations back onto the sliders.
+
+    .. note::
+        Triggered by the Redo scriptJob event. Guarded by CHUNK_NAME so it
+        only reacts when the operation just redone was a SpringyKeys apply.
+    """
+    global RESTING_STATE
+    if not SLIDER_REDO_STACK:
+        return
+    if cmds.undoInfo(q=True, undoName=True) != CHUNK_NAME:
+        return  # The thing just redone was not ours
+
+    state = SLIDER_REDO_STACK.pop()
+    SLIDER_UNDO_STACK.append(capture_slider_state())
+    restore_slider_state(state)
+    RESTING_STATE = state
+
+
 def begin():
     """Initialize processing session and capture keyframe data.
 
@@ -492,6 +573,7 @@ def begin():
         - Only captures new snapshot if selection has changed
         - Opens Maya undo chunk only when starting sliding
         - Captures current keyframe data into global KEY_DATA
+        - Records the pre-operation slider state for undo syncing
     """
     global KEY_DATA
     global SELECTION_FINGERPRINT
@@ -505,7 +587,12 @@ def begin():
         SELECTION_FINGERPRINT = get_current_selection_fingerprint()
 
     if not UNDO_OPEN:
-        cmds.undoInfo(openChunk=True)
+        # Remember the slider state as it was before this operation so an undo
+        # can restore it. A fresh operation invalidates the redo history.
+        if RESTING_STATE is not None:
+            SLIDER_UNDO_STACK.append(RESTING_STATE)
+            SLIDER_REDO_STACK.clear()
+        cmds.undoInfo(openChunk=True, chunkName=CHUNK_NAME)
         UNDO_OPEN = True
 
 
@@ -516,14 +603,17 @@ def complete(*args):
     :type args: tuple
 
     .. note::
-        Called when slider interaction is complete.
+        Called when slider interaction is complete. Records the new slider
+        state as the resting point for the next operation's undo entry.
     """
     global UNDO_OPEN
+    global RESTING_STATE
 
     # Close previous undo chunk if we had one
     if UNDO_OPEN:
         cmds.undoInfo(closeChunk=True)
         UNDO_OPEN = False
+        RESTING_STATE = capture_slider_state()
 
 
 
@@ -709,13 +799,14 @@ def ui():
     global SLIDER_DAMPING
     global SLIDER_HALFLIFE
     global SLIDER_DT
+    global RESTING_STATE
     # Check if window exists and delete it
     if cmds.window("springOverlapWin", exists=True):
         cmds.deleteUI("springOverlapWin")
 
-    window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(760, 180))  # pylint: disable=E1111
+    window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(760, 220))  # pylint: disable=E1111
 
-    cmds.columnLayout( adjustableColumn=True )
+    main_layout = cmds.columnLayout( adjustableColumn=True )
 
     # Critical Damping section: its slider on the left, its presets on the right
     cmds.frameLayout( label='Critical Damping', collapsable=False, marginWidth=4, marginHeight=4 )
@@ -747,7 +838,30 @@ def ui():
         for i in range(PRESET_COUNT):
             refresh_preset_button(section, i)
 
+    # Seed the undo-sync state with the sliders' starting values
+    RESTING_STATE = capture_slider_state()
+    SLIDER_UNDO_STACK.clear()
+    SLIDER_REDO_STACK.clear()
+
+    # Mirror slider values when the user undoes/redoes our operations. Parented
+    # to the window so the jobs are removed when it closes. Wrapped defensively
+    # so an unsupported event never blocks the window from opening.
+    try:
+        cmds.scriptJob(event=['Undo', on_undo], parent=window)
+        cmds.scriptJob(event=['Redo', on_redo], parent=window)
+    except RuntimeError:
+        cmds.warning('SpringyKeys: undo/redo slider syncing is unavailable in this Maya version.')
+
     cmds.showWindow(window)
+
+    # The window can open shorter than its content; force it tall enough to
+    # show every slider and label. The layout reports its natural height
+    # regardless of the (possibly restored) window size.
+    try:
+        content_height = cmds.columnLayout(main_layout, q=True, height=True)
+        cmds.window(window, e=True, height=max(content_height, 200))
+    except RuntimeError:
+        pass
 
 
 if __name__ == "__main__":
