@@ -536,15 +536,20 @@ def set_slider_values(values):
     .. note::
         Setting a slider value programmatically does not fire its drag
         callback, so this restores the tuning without re-processing keys.
-        The Delta Time label is refreshed so its framerate stays in sync.
+        The global DELTA_TIME and the Delta Time label are refreshed so the
+        framerate stays in sync with the restored Delta Time value.
     """
+    global DELTA_TIME
     factor, damping, halflife, dt = values
     cmds.floatSliderGrp(SLIDER_FACTOR, e=True, value=factor)
     cmds.floatSliderGrp(SLIDER_DAMPING, e=True, value=damping)
     cmds.floatSliderGrp(SLIDER_HALFLIFE, e=True, value=halflife)
     cmds.floatSliderGrp(SLIDER_DT, e=True, value=dt)
 
-    framerate = round(1.0 / max(dt, 1e-3), 2)
+    # The spring sim reads DELTA_TIME from this global rather than the
+    # slider, so keep it (and the label) in sync with the restored value.
+    DELTA_TIME = max(dt, 1e-3)
+    framerate = round(1.0 / DELTA_TIME, 2)
     cmds.floatSliderGrp(SLIDER_DT, e=True, label=f'Delta time ({framerate}fps) ')
 
 
@@ -582,10 +587,16 @@ def refresh_preset_button(index):
 
 
 def load_preset(index, *args):
-    """Restore a saved preset onto the sliders (left-click).
+    """Restore a saved preset and apply it to the current selection (left-click).
 
     :param int index: Zero-based preset slot
     :param args: Trailing Maya callback args (unused)
+
+    .. note::
+        Setting slider values in code does not fire their drag callbacks, so
+        the spring sim is run explicitly after restoring. ``complete`` closes
+        the undo chunk ``begin`` (inside ``update_spring_keys``) opened, so the
+        whole apply is a single undo step.
     """
     name = PRESET_OPTIONVAR.format(index)
     if not cmds.optionVar(exists=name):
@@ -594,6 +605,8 @@ def load_preset(index, *args):
 
     values = [float(x) for x in cmds.optionVar(q=name).split(',')]
     set_slider_values(values)
+    update_spring_keys()
+    complete()
 
 
 def save_preset(index, *args):
