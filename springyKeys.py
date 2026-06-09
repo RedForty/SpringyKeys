@@ -23,8 +23,23 @@ TIMELINE = mel.eval('string $tmpString=$gPlayBackSlider') # pylint: disable=E111
 GRAPH_EDITOR = 'graphEditor1GraphEd'
 
 PRESET_COUNT = 3
-PRESET_OPTIONVAR = 'springyKeys_preset_{}'  # persisted per slot via optionVar
-PRESET_BUTTONS = []  # UI button names, populated by ui()
+
+# Each solver is its own preset "section": its presets store only that
+# solver's sliders and applying one runs only that solver. Add a new solver
+# by adding an entry here (and a branch in the section helpers below).
+# 'buttons' is filled in by ui().
+SECTIONS = {
+    'critical': {
+        'optionvar': 'springyKeys_critical_preset_{}',
+        'labels': ['Critical Damping'],
+        'buttons': [],
+    },
+    'spring': {
+        'optionvar': 'springyKeys_spring_preset_{}',
+        'labels': ['Damping Ratio', 'Halflife', 'Delta Time'],
+        'buttons': [],
+    },
+}
 
 
 # Private ------------------------------------------------------------------- #
@@ -514,139 +529,179 @@ def complete(*args):
 
 # Presets ------------------------------------------------------------------ #
 
-def get_slider_values():
-    """Read the current value of all four tuning sliders.
+def section_slider_names(section: str):
+    """Return the slider control names owned by a solver section.
 
-    :return: [critical_damping, damping_ratio, halflife, delta_time]
+    :param str section: Section key ('critical' or 'spring')
+    :return: Slider control names, in stored-value order
     :rtype: list
     """
-    return [
-        cmds.floatSliderGrp(SLIDER_FACTOR, q=True, value=True),
-        cmds.floatSliderGrp(SLIDER_DAMPING, q=True, value=True),
-        cmds.floatSliderGrp(SLIDER_HALFLIFE, q=True, value=True),
-        cmds.floatSliderGrp(SLIDER_DT, q=True, value=True),
-    ]
+    if section == 'critical':
+        return [SLIDER_FACTOR]
+    return [SLIDER_DAMPING, SLIDER_HALFLIFE, SLIDER_DT]
 
 
-def set_slider_values(values):
-    """Push a saved set of values back onto the four tuning sliders.
+def get_section_values(section: str):
+    """Read the current values of a section's sliders.
 
-    :param list values: [critical_damping, damping_ratio, halflife, delta_time]
+    :param str section: Section key ('critical' or 'spring')
+    :return: One value per slider, in stored order
+    :rtype: list
+    """
+    return [cmds.floatSliderGrp(s, q=True, value=True)
+            for s in section_slider_names(section)]
+
+
+def set_section_values(section: str, values: list):
+    """Push saved values back onto a section's sliders.
+
+    :param str section: Section key ('critical' or 'spring')
+    :param list values: One value per slider, in stored order
 
     .. note::
-        Setting a slider value programmatically does not fire its drag
-        callback, so this restores the tuning without re-processing keys.
-        The global DELTA_TIME and the Delta Time label are refreshed so the
-        framerate stays in sync with the restored Delta Time value.
+        Setting a slider value in code does not fire its drag callback, so
+        this only restores positions. For the spring section the global
+        DELTA_TIME (which the sim reads instead of the slider) and the Delta
+        Time label are refreshed so the framerate stays in sync.
     """
     global DELTA_TIME
-    factor, damping, halflife, dt = values
-    cmds.floatSliderGrp(SLIDER_FACTOR, e=True, value=factor)
-    cmds.floatSliderGrp(SLIDER_DAMPING, e=True, value=damping)
-    cmds.floatSliderGrp(SLIDER_HALFLIFE, e=True, value=halflife)
-    cmds.floatSliderGrp(SLIDER_DT, e=True, value=dt)
+    for slider, value in zip(section_slider_names(section), values):
+        cmds.floatSliderGrp(slider, e=True, value=value)
 
-    # The spring sim reads DELTA_TIME from this global rather than the
-    # slider, so keep it (and the label) in sync with the restored value.
-    DELTA_TIME = max(dt, 1e-3)
-    framerate = round(1.0 / DELTA_TIME, 2)
-    cmds.floatSliderGrp(SLIDER_DT, e=True, label=f'Delta time ({framerate}fps) ')
+    if section == 'spring':
+        dt = values[-1]  # Delta Time is the last spring slider
+        DELTA_TIME = max(dt, 1e-3)
+        framerate = round(1.0 / DELTA_TIME, 2)
+        cmds.floatSliderGrp(SLIDER_DT, e=True, label=f'Delta time ({framerate}fps) ')
 
 
-def refresh_preset_button(index):
+def apply_section(section: str):
+    """Run a section's solver on the current selection as one undo step.
+
+    :param str section: Section key ('critical' or 'spring')
+
+    .. note::
+        Restoring slider values in code does not fire their drag callbacks,
+        so the solver is invoked explicitly. ``complete`` closes the undo
+        chunk opened by ``begin`` (inside the update functions).
+    """
+    if section == 'critical':
+        update_factor(cmds.floatSliderGrp(SLIDER_FACTOR, q=True, value=True))
+    else:
+        update_spring_keys()
+    complete()
+
+
+def refresh_preset_button(section: str, index: int):
     """Update a preset button's label and tooltip to reflect its saved state.
 
+    :param str section: Section key ('critical' or 'spring')
     :param int index: Zero-based preset slot
 
     .. note::
         Saved slots get a trailing ``*`` and a tooltip listing the stored
         values; empty slots prompt the user to right-click to save.
     """
-    if index >= len(PRESET_BUTTONS):
+    buttons = SECTIONS[section]['buttons']
+    if index >= len(buttons):
         return
 
-    button = PRESET_BUTTONS[index]
-    name = PRESET_OPTIONVAR.format(index)
+    button = buttons[index]
+    name = SECTIONS[section]['optionvar'].format(index)
 
     if cmds.optionVar(exists=name):
         values = [float(x) for x in cmds.optionVar(q=name).split(',')]
-        annotation = (
-            'Preset {0} (saved)\n'
-            'Critical Damping: {1:.3f}\n'
-            'Damping Ratio: {2:.3f}\n'
-            'Halflife: {3:.3f}\n'
-            'Delta Time: {4:.3f}\n'
-            'Left-click: restore   Right-click: edit'
-        ).format(index + 1, *values)
-        cmds.button(button, e=True, label=f'Preset {index + 1} *', annotation=annotation)
+        lines = ['{0}: {1:.3f}'.format(label, value)
+                 for label, value in zip(SECTIONS[section]['labels'], values)]
+        annotation = 'Preset {0} (saved)\n{1}\nLeft-click: apply   Right-click: edit'.format(
+            index + 1, '\n'.join(lines))
+        cmds.button(button, e=True, label=f'{index + 1} *', annotation=annotation)
     else:
         cmds.button(
-            button, e=True, label=f'Preset {index + 1}',
+            button, e=True, label=f'{index + 1}',
             annotation=f'Preset {index + 1} (empty)\nRight-click to save current values'
         )
 
 
-def load_preset(index, *args):
-    """Restore a saved preset and apply it to the current selection (left-click).
+def load_preset(section: str, index: int, *args):
+    """Restore a preset and apply its solver to the selection (left-click).
 
+    :param str section: Section key ('critical' or 'spring')
     :param int index: Zero-based preset slot
     :param args: Trailing Maya callback args (unused)
-
-    .. note::
-        Setting slider values in code does not fire their drag callbacks, so
-        the spring sim is run explicitly after restoring. ``complete`` closes
-        the undo chunk ``begin`` (inside ``update_spring_keys``) opened, so the
-        whole apply is a single undo step.
     """
-    name = PRESET_OPTIONVAR.format(index)
+    name = SECTIONS[section]['optionvar'].format(index)
     if not cmds.optionVar(exists=name):
         cmds.warning(f'Preset {index + 1} is empty. Right-click to save current values.')
         return
 
     values = [float(x) for x in cmds.optionVar(q=name).split(',')]
-    set_slider_values(values)
-    update_spring_keys()
-    complete()
+    set_section_values(section, values)
+    apply_section(section)
 
 
-def save_preset(index, *args):
-    """Store the current slider values into a preset slot (right-click menu).
+def save_preset(section: str, index: int, *args):
+    """Store a section's current slider values into a preset slot (right-click).
 
+    :param str section: Section key ('critical' or 'spring')
     :param int index: Zero-based preset slot
     :param args: Trailing Maya callback args (unused)
     """
-    name = PRESET_OPTIONVAR.format(index)
-    values = get_slider_values()
+    name = SECTIONS[section]['optionvar'].format(index)
+    values = get_section_values(section)
     cmds.optionVar(stringValue=(name, ','.join(repr(v) for v in values)))
-    refresh_preset_button(index)
+    refresh_preset_button(section, index)
 
 
-def clear_preset(index, *args):
+def clear_preset(section: str, index: int, *args):
     """Remove a preset slot's saved values (right-click menu).
 
+    :param str section: Section key ('critical' or 'spring')
     :param int index: Zero-based preset slot
     :param args: Trailing Maya callback args (unused)
     """
-    name = PRESET_OPTIONVAR.format(index)
+    name = SECTIONS[section]['optionvar'].format(index)
     if cmds.optionVar(exists=name):
         cmds.optionVar(remove=name)
-    refresh_preset_button(index)
+    refresh_preset_button(section, index)
+
+
+def build_preset_row(section: str):
+    """Build a horizontal row of preset buttons for a solver section.
+
+    :param str section: Section key ('critical' or 'spring')
+
+    .. note::
+        Left-click applies the preset; right-click opens a save/clear menu.
+        Created button names are recorded on the section for later refresh.
+    """
+    SECTIONS[section]['buttons'] = []
+    cmds.rowLayout(numberOfColumns=PRESET_COUNT, columnAttach=[
+        (i + 1, 'both', 2) for i in range(PRESET_COUNT)])
+    for i in range(PRESET_COUNT):
+        button = cmds.button( label=f'{i + 1}', width=44, height=24
+                            , command=partial(load_preset, section, i) )  # pylint: disable=E1111
+        cmds.popupMenu( parent=button, button=3 )
+        cmds.menuItem( label='Save current values', command=partial(save_preset, section, i) )
+        cmds.menuItem( label='Clear saved values', command=partial(clear_preset, section, i) )
+        SECTIONS[section]['buttons'].append(button)
+    cmds.setParent('..')
 
 
 def ui():
     """Create and display the SpringyKeys user interface.
 
     .. note::
-        Creates a window with four sliders:
+        Two solver sections, each with its own bank of preset buttons:
 
-        - Critical Damping Ratio: Simple interpolation-based smoothing
-        - Damping Ratio: Controls oscillation behavior in spring physics
-        - Halflife: Controls decay rate of spring oscillations
-        - Delta Time: Simulation time step (affects responsiveness)
+        - Critical Damping: simple interpolation-based smoothing
+          (Critical Damping Ratio slider)
+        - Spring Physics: full spring-damper simulation
+          (Damping Ratio, Halflife, Delta Time sliders)
 
-        A column of preset buttons sits on the right. Left-click restores a
-        saved set of slider values; right-click offers save/clear. Presets
-        persist across Maya sessions via optionVar.
+        Each section's presets store only that section's sliders. Left-click a
+        preset to apply that solver to the selection; right-click to save or
+        clear. Presets persist across Maya sessions via optionVar.
 
         Window is recreated if it already exists.
     """
@@ -654,40 +709,43 @@ def ui():
     global SLIDER_DAMPING
     global SLIDER_HALFLIFE
     global SLIDER_DT
-    global PRESET_BUTTONS
     # Check if window exists and delete it
     if cmds.window("springOverlapWin", exists=True):
         cmds.deleteUI("springOverlapWin")
 
-    window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(720, 120))  # pylint: disable=E1111
+    window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(760, 180))  # pylint: disable=E1111
 
-    # Sliders on the left, preset buttons in a column on the right
-    cmds.rowLayout(numberOfColumns=2, adjustableColumn=1
-                 , columnAttach=[(1, 'both', 0), (2, 'both', 6)])
+    cmds.columnLayout( adjustableColumn=True )
 
-    cmds.columnLayout( adjustableColumn=True)
+    # Critical Damping section: its slider on the left, its presets on the right
+    cmds.frameLayout( label='Critical Damping', collapsable=False, marginWidth=4, marginHeight=4 )
+    cmds.rowLayout( numberOfColumns=2, adjustableColumn=1
+                  , columnAttach=[(1, 'both', 0), (2, 'both', 6)] )
+    cmds.columnLayout( adjustableColumn=True )
     SLIDER_FACTOR = cmds.floatSliderGrp( label='Critical Damping Ratio' , field=True, min=0.0, max=1.0, value=DAMPING_FACTOR, step=0.001, dragCommand=update_factor,  changeCommand=complete, adjustableColumn=0  )  # pylint: disable=E1111
-    cmds.separator()
+    cmds.setParent('..')
+    build_preset_row('critical')
+    cmds.setParent('..')  # rowLayout
+    cmds.setParent('..')  # frameLayout
+
+    # Spring Physics section: its sliders on the left, its presets on the right
+    cmds.frameLayout( label='Spring Physics', collapsable=False, marginWidth=4, marginHeight=4 )
+    cmds.rowLayout( numberOfColumns=2, adjustableColumn=1
+                  , columnAttach=[(1, 'both', 0), (2, 'both', 6)] )
+    cmds.columnLayout( adjustableColumn=True )
     SLIDER_DAMPING  = cmds.floatSliderGrp( label='Damping Ratio ', field=True, min=0.001, max=1.0, value=DAMPING_RATIO, step=0.001, dragCommand=update_spring_keys, changeCommand=complete, adjustableColumn=0 )  # pylint: disable=E1111
     SLIDER_HALFLIFE = cmds.floatSliderGrp( label='Halflife' , field=True, min=0.0, max=1.0, value=HALFLIFE, step=0.001, dragCommand=update_spring_keys,  changeCommand=complete, adjustableColumn=0  )  # pylint: disable=E1111
     SLIDER_DT = cmds.floatSliderGrp( label='Delta time (30fps) ' , field=True, min=0.001, max=1.0, value=DELTA_TIME, step=0.001, dragCommand=update_deltatime,  changeCommand=complete, adjustableColumn=0  )  # pylint: disable=E1111
     cmds.setParent('..')
+    build_preset_row('spring')
+    cmds.setParent('..')  # rowLayout
+    cmds.setParent('..')  # frameLayout
 
-    PRESET_BUTTONS = []
-    cmds.columnLayout( rowSpacing=4 )
-    for i in range(PRESET_COUNT):
-        button = cmds.button( label=f'Preset {i + 1}', width=96, height=26
-                            , command=partial(load_preset, i) )  # pylint: disable=E1111
-        cmds.popupMenu( parent=button, button=3 )
-        cmds.menuItem( label='Save current values', command=partial(save_preset, i) )
-        cmds.menuItem( label='Clear saved values', command=partial(clear_preset, i) )
-        PRESET_BUTTONS.append(button)
-    cmds.setParent('..')
+    cmds.setParent('..')  # main columnLayout
 
-    cmds.setParent('..')
-
-    for i in range(PRESET_COUNT):
-        refresh_preset_button(i)
+    for section in SECTIONS:
+        for i in range(PRESET_COUNT):
+            refresh_preset_button(section, i)
 
     cmds.showWindow(window)
 
