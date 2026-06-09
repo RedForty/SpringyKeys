@@ -804,9 +804,16 @@ def ui():
     if cmds.window("springOverlapWin", exists=True):
         cmds.deleteUI("springOverlapWin")
 
+    # Forget any remembered size so the fit-to-content below is what shows.
+    try:
+        if cmds.windowPref("springOverlapWin", exists=True):
+            cmds.windowPref("springOverlapWin", remove=True)
+    except (RuntimeError, TypeError):
+        pass
+
     window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(760, 160))  # pylint: disable=E1111
 
-    main_layout = cmds.columnLayout( adjustableColumn=True )
+    cmds.columnLayout( adjustableColumn=True )
 
     # Critical Damping section: its slider on the left, its presets on the right
     cmds.frameLayout( label='Critical Damping', collapsable=False, marginWidth=4, marginHeight=4 )
@@ -854,14 +861,12 @@ def ui():
 
     cmds.showWindow(window)
 
-    # Open at the size of the content. A columnLayout stacks its children and
-    # reports their summed (natural) height regardless of the window size, so
-    # matching the window to it avoids both clipping and empty space.
+    # Open at the size of the content. resizeToFitChildren shrinks/grows the
+    # window to exactly fit its laid-out children, avoiding empty space below
+    # the sliders. Guarded so an unsupported flag never breaks the window.
     try:
-        content_height = cmds.columnLayout(main_layout, q=True, height=True)
-        if content_height and content_height > 0:
-            cmds.window(window, e=True, height=content_height)
-    except RuntimeError:
+        cmds.window(window, e=True, resizeToFitChildren=True)
+    except (RuntimeError, TypeError):
         pass
 
 
