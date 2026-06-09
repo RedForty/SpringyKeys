@@ -804,7 +804,7 @@ def ui():
     if cmds.window("springOverlapWin", exists=True):
         cmds.deleteUI("springOverlapWin")
 
-    window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(760, 220))  # pylint: disable=E1111
+    window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(760, 160))  # pylint: disable=E1111
 
     main_layout = cmds.columnLayout( adjustableColumn=True )
 
@@ -854,12 +854,13 @@ def ui():
 
     cmds.showWindow(window)
 
-    # The window can open shorter than its content; force it tall enough to
-    # show every slider and label. The layout reports its natural height
-    # regardless of the (possibly restored) window size.
+    # Open at the size of the content. A columnLayout stacks its children and
+    # reports their summed (natural) height regardless of the window size, so
+    # matching the window to it avoids both clipping and empty space.
     try:
         content_height = cmds.columnLayout(main_layout, q=True, height=True)
-        cmds.window(window, e=True, height=max(content_height, 200))
+        if content_height and content_height > 0:
+            cmds.window(window, e=True, height=content_height)
     except RuntimeError:
         pass
 
