@@ -198,6 +198,11 @@ def halflife_to_damping(halflife: float, eps: float=1e-5):
     return (4.0 * 0.69314718056) / (halflife + eps)
 
 
+def halflife_to_lag(halflife: float):
+    """Convert a halflife to its equivalent lag time (halflife / ln 2)."""
+    return halflife / 0.69314718056
+
+
 def fast_atan(x: float):
     """Fast polynomial approximation of arctangent (radians)."""
     z = abs(x)
@@ -312,6 +317,51 @@ def critical_spring_damper_exact(x: float, v: float, x_goal: float,
     new_x = eydt * (j0 + j1 * dt) + c
     new_v = eydt * (v - j1 * y * dt)
     return new_x, new_v
+
+
+def simple_spring_damper_exact(x: float, v: float, x_goal: float,
+                               halflife: float, dt: float):
+    """Simple critically damped spring toward a goal (goal velocity assumed 0).
+
+    :return: (new_position, new_velocity) after time step dt
+    :rtype: tuple
+    """
+    y = halflife_to_damping(halflife) / 2.0
+    j0 = x - x_goal
+    j1 = v + j0 * y
+    eydt = fast_negexp(y * dt)
+    new_x = eydt * (j0 + j1 * dt) + x_goal
+    new_v = eydt * (v - j1 * y * dt)
+    return new_x, new_v
+
+
+def velocity_spring_damper_exact(x: float, v: float, xi: float, x_goal: float,
+                                 v_goal: float, halflife: float, dt: float):
+    """Velocity spring: drive toward a goal at a target speed ``v_goal``.
+
+    ``xi`` is an intermediate tracker advanced toward ``x_goal`` at speed
+    ``v_goal``; the spring chases a lag-compensated projection of it. Faithful
+    port of Holden's velocity_spring_damper_exact.
+
+    :return: (new_position, new_velocity, new_xi)
+    :rtype: tuple
+    """
+    x_diff = (1.0 if (x_goal - xi) > 0.0 else -1.0) * v_goal
+
+    t_goal_future = halflife_to_lag(halflife)
+    if abs(x_goal - xi) > t_goal_future * v_goal:
+        x_goal_future = xi + x_diff * t_goal_future
+    else:
+        x_goal_future = x_goal
+
+    x, v = simple_spring_damper_exact(x, v, x_goal_future, halflife, dt)
+
+    if abs(x_goal - xi) > dt * v_goal:
+        xi = xi + x_diff * dt
+    else:
+        xi = x_goal
+
+    return x, v, xi
 
 
 def decay_spring_damper_exact(x: float, v: float, halflife: float, dt: float):
@@ -440,6 +490,29 @@ def process_double_spring(params: dict, data: dict, dt: float):
     return out
 
 
+def process_velocity_spring(params: dict, data: dict, dt: float):
+    """Speed-limited follow: move toward the curve at a capped speed.
+
+    ``speed`` is a fraction (0-1) of the curve's own peak speed, so the control
+    is curve-adaptive: 1.0 lets the motion keep up (like a critical spring),
+    lower values cap the speed and introduce lag.
+    """
+    halflife = params['halflife']
+    fraction = params['speed']
+    values = data['values']
+    peak_speed = max((abs(values[i] - values[i - 1]) / dt
+                      for i in range(1, len(values))), default=0.0)
+    v_goal = fraction * peak_speed
+    x = values[0]
+    v = (x - data['pre_value']) / dt
+    xi = values[0]
+    out = [x]
+    for goal in values[1:]:
+        x, v, xi = velocity_spring_damper_exact(x, v, xi, goal, v_goal, halflife, dt)
+        out.append(x)
+    return out
+
+
 def process_extrapolation(params: dict, data: dict, dt: float, eps: float=1e-5):
     """Coast from the entry velocity, easing to a stop; ignores the goal values.
 
@@ -512,6 +585,7 @@ SOLVER_ORDER = [
     'damper_exact',
     'critical_spring',
     'double_spring',
+    'velocity_spring',
     'extrapolation',
     'inertialize',
     'resonance',
@@ -553,6 +627,14 @@ SOLVERS = {
             {'name': 'halflife', 'label': 'Halflife', 'min': 0.0, 'max': 1.0, 'default': 0.2},
         ],
         'process': process_double_spring,
+    },
+    'velocity_spring': {
+        'title': 'Velocity Spring (Speed Limit)',
+        'params': [
+            {'name': 'halflife', 'label': 'Halflife', 'min': 0.0, 'max': 1.0, 'default': 0.2},
+            {'name': 'speed', 'label': 'Speed (x peak)', 'min': 0.0, 'max': 1.0, 'default': 0.5},
+        ],
+        'process': process_velocity_spring,
     },
     'extrapolation': {
         'title': 'Extrapolation (Follow-through)',
