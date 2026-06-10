@@ -344,6 +344,31 @@ def double_spring_damper_exact(x: float, v: float, xi: float, vi: float,
     return x, v, xi, vi
 
 
+def resonant_spring_damper_exact(x: float, v: float, x_goal: float,
+                                 frequency: float, halflife: float,
+                                 dt: float, eps: float=1e-5):
+    """Under-damped spring with an explicit oscillation frequency (Hz).
+
+    Produces resonant overshoot/wobble around the goal that decays over the
+    halflife. Used to layer secondary motion on top of a driving curve.
+
+    :param float frequency: Damped oscillation frequency in Hz
+    :param float halflife: Time for the oscillation amplitude to halve
+    :return: (new_position, new_velocity) after time step dt
+    :rtype: tuple
+    """
+    c = x_goal
+    w = 2.0 * math.pi * frequency            # damped angular frequency
+    y = halflife_to_damping(halflife) / 2.0  # decay rate
+    j = math.sqrt((v + y * (x - c))**2 / (w * w + eps) + (x - c)**2)
+    p = fast_atan((v + (x - c) * y) / (-(x - c) * w + eps))
+    j = j if (x - c) > 0.0 else -j
+    eydt = fast_negexp(y * dt)
+    new_x = j * eydt * math.cos(w * dt + p) + c
+    new_v = -y * j * eydt * math.cos(w * dt + p) - w * j * eydt * math.sin(w * dt + p)
+    return new_x, new_v
+
+
 # Solver process functions -------------------------------------------------- #
 #
 # Each takes (params: dict, data: dict, dt: float) and returns the new value
@@ -456,6 +481,26 @@ def process_inertialize(params: dict, data: dict, dt: float):
     return out
 
 
+def process_resonance(params: dict, data: dict, dt: float):
+    """Resonant secondary motion: an under-damped oscillator driven by the curve.
+
+    Blends a resonant (wobbling) version of the motion over the original by
+    ``amount``. ``frequency`` sets the wobble speed and ``halflife`` how fast it
+    settles. At amount 0 the curve is unchanged; at 1 it is fully springy.
+    """
+    frequency = params['frequency']
+    halflife = params['halflife']
+    amount = params['amount']
+    values = data['values']
+    x = values[0]
+    v = (x - data['pre_value']) / dt
+    out = [x]
+    for goal in values[1:]:
+        x, v = resonant_spring_damper_exact(x, v, goal, frequency, halflife, dt)
+        out.append(lerp(goal, x, amount))
+    return out
+
+
 # Solver registry ----------------------------------------------------------- #
 #
 # Order here is the order shown in the window. Add a solver by adding an entry;
@@ -469,6 +514,7 @@ SOLVER_ORDER = [
     'double_spring',
     'extrapolation',
     'inertialize',
+    'resonance',
 ]
 
 SOLVERS = {
@@ -521,6 +567,15 @@ SOLVERS = {
             {'name': 'halflife', 'label': 'Halflife', 'min': 0.0, 'max': 1.0, 'default': 0.25},
         ],
         'process': process_inertialize,
+    },
+    'resonance': {
+        'title': 'Resonance (Secondary Motion)',
+        'params': [
+            {'name': 'frequency', 'label': 'Frequency (Hz)', 'min': 0.1, 'max': 15.0, 'default': 3.0},
+            {'name': 'halflife', 'label': 'Halflife', 'min': 0.001, 'max': 2.0, 'default': 0.3},
+            {'name': 'amount', 'label': 'Amount', 'min': 0.0, 'max': 1.0, 'default': 1.0},
+        ],
+        'process': process_resonance,
     },
 }
 
