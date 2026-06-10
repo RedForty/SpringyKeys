@@ -415,6 +415,47 @@ def process_double_spring(params: dict, data: dict, dt: float):
     return out
 
 
+def process_extrapolation(params: dict, data: dict, dt: float, eps: float=1e-5):
+    """Coast from the entry velocity, easing to a stop; ignores the goal values.
+
+    Replaces the selection with inertial follow-through: it starts at the first
+    key with the incoming velocity and decays that velocity to zero over the
+    halflife, ignoring the original keyframe values. Good for ballistic tails.
+    """
+    halflife = params['halflife']
+    values = data['values']
+    x = values[0]
+    v = (x - data['pre_value']) / dt
+    y = 0.69314718056 / (halflife + eps)
+    out = [x]
+    for _ in values[1:]:
+        eydt = fast_negexp(y * dt)
+        x = x + (v / (y + eps)) * (1.0 - eydt)
+        v = v * eydt
+        out.append(x)
+    return out
+
+
+def process_inertialize(params: dict, data: dict, dt: float):
+    """Blend out the velocity pop at the start while keeping the original shape.
+
+    Keeps the original animation but injects the incoming velocity at the first
+    key and decays the resulting offset to zero over the halflife, so the
+    selection eases out of the preceding motion without a momentum discontinuity.
+    """
+    halflife = params['halflife']
+    values = data['values']
+    src_v = (values[0] - data['pre_value']) / dt
+    dst_v0 = (values[1] - values[0]) / dt
+    off_x = 0.0
+    off_v = src_v - dst_v0
+    out = [values[0]]
+    for value in values[1:]:
+        off_x, off_v = decay_spring_damper_exact(off_x, off_v, halflife, dt)
+        out.append(value + off_x)
+    return out
+
+
 # Solver registry ----------------------------------------------------------- #
 #
 # Order here is the order shown in the window. Add a solver by adding an entry;
@@ -426,6 +467,8 @@ SOLVER_ORDER = [
     'damper_exact',
     'critical_spring',
     'double_spring',
+    'extrapolation',
+    'inertialize',
 ]
 
 SOLVERS = {
@@ -464,6 +507,20 @@ SOLVERS = {
             {'name': 'halflife', 'label': 'Halflife', 'min': 0.0, 'max': 1.0, 'default': 0.2},
         ],
         'process': process_double_spring,
+    },
+    'extrapolation': {
+        'title': 'Extrapolation (Follow-through)',
+        'params': [
+            {'name': 'halflife', 'label': 'Halflife', 'min': 0.001, 'max': 2.0, 'default': 0.4},
+        ],
+        'process': process_extrapolation,
+    },
+    'inertialize': {
+        'title': 'Inertialization',
+        'params': [
+            {'name': 'halflife', 'label': 'Halflife', 'min': 0.0, 'max': 1.0, 'default': 0.25},
+        ],
+        'process': process_inertialize,
     },
 }
 
