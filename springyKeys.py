@@ -146,15 +146,21 @@ def get_selected_keyframe_data():
         if is_equal(value_range):
             continue  # Ignore flat curves
 
-        # Get the value at the frame before the first selected key
-        # so we can compute the incoming velocity at the start
+        # Get the values at the two frames before the first selected key so
+        # solvers can compute the incoming velocity (and, for inertialization,
+        # the source position/velocity) at the start of the selection.
         pre_time = time_range[0] - 1
         pre_value = cmds.keyframe(curve, q=True, time=(pre_time,), eval=True, valueChange=True)
         pre_value = pre_value[0] if pre_value else value_range[0]
 
+        pre2_time = time_range[0] - 2
+        pre2_value = cmds.keyframe(curve, q=True, time=(pre2_time,), eval=True, valueChange=True)
+        pre2_value = pre2_value[0] if pre2_value else pre_value
+
         key_data[curve] = { "times": time_range
                           , "values": value_range
                           , "pre_value": pre_value
+                          , "pre2_value": pre2_value
                           }
 
     if key_data:
@@ -535,19 +541,28 @@ def process_extrapolation(params: dict, data: dict, dt: float, eps: float=1e-5):
 
 
 def process_inertialize(params: dict, data: dict, dt: float):
-    """Blend out the velocity pop at the start while keeping the original shape.
+    """Blend out a discontinuity at the start of the selection, easing to shape.
 
-    Keeps the original animation but injects the incoming velocity at the first
-    key and decays the resulting offset to zero over the halflife, so the
-    selection eases out of the preceding motion without a momentum discontinuity.
+    Inertialization removes a position/velocity pop at the selection boundary:
+    the output starts matching the preceding (source) motion and decays the
+    offset to zero over the halflife, converging onto the original selection.
+    Select starting *at* the discontinuity for it to act on it; a smooth start
+    yields little change (there is no pop to remove).
     """
     halflife = params['halflife']
     values = data['values']
-    src_v = (values[0] - data['pre_value']) / dt
-    dst_v0 = (values[1] - values[0]) / dt
-    off_x = 0.0
-    off_v = src_v - dst_v0
-    out = [values[0]]
+    pre = data['pre_value']
+    pre2 = data.get('pre2_value', pre)
+
+    # Source: the preceding motion extrapolated to the first selected frame.
+    src_v = (pre - pre2) / dt
+    src_x = pre + src_v * dt
+    # Destination: the original selection.
+    dst_v = (values[1] - values[0]) / dt
+
+    off_x = src_x - values[0]
+    off_v = src_v - dst_v
+    out = [values[0] + off_x]
     for value in values[1:]:
         off_x, off_v = decay_spring_damper_exact(off_x, off_v, halflife, dt)
         out.append(value + off_x)
