@@ -262,7 +262,7 @@ def spring_damper_exact_ratio(
 
     if abs(s - (d * d) / 4.0) < eps:  # Critically Damped
         j0 = x - c
-        j1 = y + j0 * y
+        j1 = v + j0 * y
 
         eydt = fast_negexp(y * dt)
 
