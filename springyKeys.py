@@ -20,13 +20,10 @@ from maya import cmds, mel
 UNDO_OPEN = False
 KEY_DATA = {}
 SELECTION_FINGERPRINT = {}
-DELTA_TIME = 1 / 30.0      # Shared simulation timestep (frame time) for solvers
-LAST_SOLVER = None         # Last solver applied; re-run when Delta Time changes
 TIMELINE = mel.eval('string $tmpString=$gPlayBackSlider') # pylint: disable=E1111
 GRAPH_EDITOR = 'graphEditor1GraphEd'
 
 # UI control names, populated by ui().
-DT_SLIDER = None                  # The shared Delta Time slider
 SLIDER_CONTROLS = {}              # {solver_key: {param_name: slider_control}}
 PRESET_BUTTONS = {}               # {solver_key: [button, ...]}
 
@@ -427,12 +424,13 @@ def resonant_spring_damper_exact(x: float, v: float, x_goal: float,
 
 # Solver process functions -------------------------------------------------- #
 #
-# Each takes (params: dict, data: dict, dt: float) and returns the new value
-# list for one curve. ``data`` has 'values', 'times' and 'pre_value'. They are
-# pure (no Maya calls) so they can be unit tested outside Maya.
+# Each takes (params: dict, data: dict) and returns the new value list for one
+# curve. ``data`` has 'values', 'times', 'pre_value' and 'pre2_value'. Solvers
+# that integrate over time read their own timestep from ``params['dt']``. They
+# are pure (no Maya calls) so they can be unit tested outside Maya.
 
-def process_lerp(params: dict, data: dict, dt: float):
-    """Simple iterative lerp smoothing (frame-rate dependent)."""
+def process_lerp(params: dict, data: dict):
+    """Simple iterative lerp smoothing (frame-rate dependent; no dt term)."""
     factor = params['factor']
     x = data['values'][0]
     out = []
@@ -442,8 +440,9 @@ def process_lerp(params: dict, data: dict, dt: float):
     return out
 
 
-def process_spring_ratio(params: dict, data: dict, dt: float):
+def process_spring_ratio(params: dict, data: dict):
     """Full spring-damper; can overshoot/oscillate depending on damping ratio."""
+    dt = max(params['dt'], 1e-3)
     damping_ratio = params['damping']
     halflife = params['halflife']
     values = data['values']
@@ -456,8 +455,9 @@ def process_spring_ratio(params: dict, data: dict, dt: float):
     return out
 
 
-def process_damper_exact(params: dict, data: dict, dt: float):
+def process_damper_exact(params: dict, data: dict):
     """Exponential smoothing toward each value; no overshoot."""
+    dt = max(params['dt'], 1e-3)
     halflife = params['halflife']
     values = data['values']
     x = values[0]
@@ -468,8 +468,9 @@ def process_damper_exact(params: dict, data: dict, dt: float):
     return out
 
 
-def process_critical_spring(params: dict, data: dict, dt: float):
+def process_critical_spring(params: dict, data: dict):
     """Critically damped spring; preserves momentum, no overshoot."""
+    dt = max(params['dt'], 1e-3)
     halflife = params['halflife']
     values = data['values']
     x = values[0]
@@ -481,8 +482,9 @@ def process_critical_spring(params: dict, data: dict, dt: float):
     return out
 
 
-def process_double_spring(params: dict, data: dict, dt: float):
+def process_double_spring(params: dict, data: dict):
     """Double critically damped spring; extra-smooth with a softer start."""
+    dt = max(params['dt'], 1e-3)
     halflife = params['halflife']
     values = data['values']
     x = values[0]
@@ -496,13 +498,14 @@ def process_double_spring(params: dict, data: dict, dt: float):
     return out
 
 
-def process_velocity_spring(params: dict, data: dict, dt: float):
+def process_velocity_spring(params: dict, data: dict):
     """Speed-limited follow: move toward the curve at a capped speed.
 
     ``speed`` is a fraction (0-1) of the curve's own peak speed, so the control
     is curve-adaptive: 1.0 lets the motion keep up (like a critical spring),
     lower values cap the speed and introduce lag.
     """
+    dt = max(params['dt'], 1e-3)
     halflife = params['halflife']
     fraction = params['speed']
     values = data['values']
@@ -519,13 +522,14 @@ def process_velocity_spring(params: dict, data: dict, dt: float):
     return out
 
 
-def process_extrapolation(params: dict, data: dict, dt: float, eps: float=1e-5):
+def process_extrapolation(params: dict, data: dict, eps: float=1e-5):
     """Coast from the entry velocity, easing to a stop; ignores the goal values.
 
     Replaces the selection with inertial follow-through: it starts at the first
     key with the incoming velocity and decays that velocity to zero over the
     halflife, ignoring the original keyframe values. Good for ballistic tails.
     """
+    dt = max(params['dt'], 1e-3)
     halflife = params['halflife']
     values = data['values']
     x = values[0]
@@ -540,7 +544,7 @@ def process_extrapolation(params: dict, data: dict, dt: float, eps: float=1e-5):
     return out
 
 
-def process_inertialize(params: dict, data: dict, dt: float):
+def process_inertialize(params: dict, data: dict):
     """Blend out a discontinuity at the start of the selection, easing to shape.
 
     Inertialization removes a position/velocity pop at the selection boundary:
@@ -549,6 +553,7 @@ def process_inertialize(params: dict, data: dict, dt: float):
     Select starting *at* the discontinuity for it to act on it; a smooth start
     yields little change (there is no pop to remove).
     """
+    dt = max(params['dt'], 1e-3)
     halflife = params['halflife']
     values = data['values']
     pre = data['pre_value']
@@ -569,13 +574,14 @@ def process_inertialize(params: dict, data: dict, dt: float):
     return out
 
 
-def process_resonance(params: dict, data: dict, dt: float):
+def process_resonance(params: dict, data: dict):
     """Resonant secondary motion: an under-damped oscillator driven by the curve.
 
     Blends a resonant (wobbling) version of the motion over the original by
     ``amount``. ``frequency`` sets the wobble speed and ``halflife`` how fast it
     settles. At amount 0 the curve is unchanged; at 1 it is fully springy.
     """
+    dt = max(params['dt'], 1e-3)
     frequency = params['frequency']
     halflife = params['halflife']
     amount = params['amount']
@@ -676,6 +682,14 @@ SOLVERS = {
     },
 }
 
+# Every time-integrating solver gets its own Delta Time slider (so it can be
+# tuned per-filter and saved in that filter's presets). The lerp damper has no
+# timestep, so it is excluded.
+DT_PARAM = {'name': 'dt', 'label': 'Delta time', 'min': 0.001, 'max': 1.0, 'default': 1.0 / 30.0}
+for _key, _spec in SOLVERS.items():
+    if _key != 'critical':
+        _spec['params'] = _spec['params'] + [dict(DT_PARAM)]
+
 
 # Apply --------------------------------------------------------------------- #
 
@@ -691,40 +705,45 @@ def apply_solver(key: str, *args):
     :param str key: Solver key
     :param args: Trailing Maya callback args (unused)
     """
-    global LAST_SOLVER
     begin()
     if not KEY_DATA:
         return
-    LAST_SOLVER = key
 
     params = get_param_values(key)
-    dt = max(DELTA_TIME, 1e-3)
     process = SOLVERS[key]['process']
 
     for curve, data in KEY_DATA.items():
-        new_values = process(params, data, dt)
+        new_values = process(params, data)
         apply_values(curve, data['times'], new_values)
 
 
-def update_dt(*args):
-    """Delta Time slider callback: update the shared timestep and re-apply.
+def refresh_dt_label(key: str):
+    """Refresh a solver's Delta Time slider label to show its framerate."""
+    control = SLIDER_CONTROLS.get(key, {}).get('dt')
+    if not control:
+        return
+    dt = max(cmds.floatSliderGrp(control, q=True, value=True), 1e-3)
+    framerate = round(1.0 / dt, 2)
+    cmds.floatSliderGrp(control, e=True, label=f'Delta time ({framerate}fps) ')
 
-    :param args: args[0] is the new delta time value
-    """
-    global DELTA_TIME
-    begin()
-    DELTA_TIME = max(args[0], 1e-3)
-    framerate = round(1.0 / DELTA_TIME, 2)
-    cmds.floatSliderGrp(DT_SLIDER, e=True, label=f'Delta time ({framerate}fps) ')
-    if LAST_SOLVER:
-        apply_solver(LAST_SOLVER)
+
+def refresh_all_dt_labels():
+    """Refresh every solver's Delta Time label (after restore / preset load)."""
+    for key in SOLVER_ORDER:
+        refresh_dt_label(key)
+
+
+def on_dt_drag(key: str, *args):
+    """Delta Time slider drag callback: refresh its framerate label and apply."""
+    refresh_dt_label(key)
+    apply_solver(key)
 
 
 # Undo / redo slider sync --------------------------------------------------- #
 
 def all_slider_controls():
-    """All slider control names: the shared Delta Time plus every solver param."""
-    controls = [DT_SLIDER] if DT_SLIDER else []
+    """All slider control names across every solver."""
+    controls = []
     for key in SOLVER_ORDER:
         controls.extend(SLIDER_CONTROLS.get(key, {}).values())
     return controls
@@ -739,16 +758,12 @@ def capture_slider_state():
 def restore_slider_state(state: dict):
     """Push a captured slider snapshot back onto the sliders.
 
-    Also resyncs the DELTA_TIME global and Delta Time label from the slider.
+    Also refreshes the per-solver Delta Time labels so their framerates stay
+    in sync with the restored values.
     """
-    global DELTA_TIME
     for control, value in state.items():
         cmds.floatSliderGrp(control, e=True, value=value)
-
-    if DT_SLIDER:
-        DELTA_TIME = max(cmds.floatSliderGrp(DT_SLIDER, q=True, value=True), 1e-3)
-        framerate = round(1.0 / DELTA_TIME, 2)
-        cmds.floatSliderGrp(DT_SLIDER, e=True, label=f'Delta time ({framerate}fps) ')
+    refresh_all_dt_labels()
 
 
 def on_undo():
@@ -874,6 +889,7 @@ def load_preset(key: str, index: int, *args):
 
     values = [float(x) for x in cmds.optionVar(q=name).split(',')]
     set_solver_param_values(key, values)
+    refresh_dt_label(key)
     apply_solver(key)
     complete()
 
@@ -923,9 +939,18 @@ def build_solver_frame(key: str):
 
     cmds.columnLayout( adjustableColumn=True )
     for p in spec['params']:
-        control = cmds.floatSliderGrp( label=p['label'], field=True
+        if p['name'] == 'dt':
+            # The timestep slider shows its framerate and refreshes that label
+            # as it is dragged.
+            framerate = round(1.0 / p['default'], 2)
+            label = f'Delta time ({framerate}fps) '
+            drag = partial(on_dt_drag, key)
+        else:
+            label = p['label']
+            drag = partial(apply_solver, key)
+        control = cmds.floatSliderGrp( label=label, field=True
                                      , min=p['min'], max=p['max'], value=p['default']
-                                     , step=0.001, dragCommand=partial(apply_solver, key)
+                                     , step=0.001, dragCommand=drag
                                      , changeCommand=complete, adjustableColumn=0 )  # pylint: disable=E1111
         SLIDER_CONTROLS[key][p['name']] = control
     cmds.setParent('..')
@@ -939,13 +964,12 @@ def ui():
     """Create and display the SpringyKeys user interface.
 
     .. note::
-        One shared Delta Time control at the top, then a collapsible frame per
-        solver (see SOLVER_ORDER), each with its tuning sliders and a bank of
-        three presets. Left-click a preset to apply that solver to the
-        selection; right-click to save or clear. Presets persist across Maya
-        sessions via optionVar.
+        A collapsible frame per solver (see SOLVER_ORDER), each with its tuning
+        sliders -- including its own Delta Time where the solver integrates over
+        time -- and a bank of three presets. Left-click a preset to apply that
+        solver to the selection; right-click to save or clear. Presets persist
+        across Maya sessions via optionVar.
     """
-    global DT_SLIDER
     global RESTING_STATE
 
     if cmds.window("springOverlapWin", exists=True):
@@ -961,14 +985,6 @@ def ui():
     window = cmds.window("springOverlapWin", title="SpringyKeys", iconName='springykeys', widthHeight=(760, 200))  # pylint: disable=E1111
 
     cmds.columnLayout( adjustableColumn=True )
-
-    # Shared Delta Time (frame time) used by all spring-based solvers
-    framerate = round(1.0 / DELTA_TIME, 2)
-    DT_SLIDER = cmds.floatSliderGrp( label=f'Delta time ({framerate}fps) ', field=True
-                                   , min=0.001, max=1.0, value=DELTA_TIME, step=0.001
-                                   , dragCommand=update_dt, changeCommand=complete
-                                   , adjustableColumn=0 )  # pylint: disable=E1111
-    cmds.separator( style='in', height=8 )
 
     for key in SOLVER_ORDER:
         build_solver_frame(key)
